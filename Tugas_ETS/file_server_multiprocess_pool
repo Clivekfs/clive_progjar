@@ -5,11 +5,15 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing # For freeze_support
 
 from file_protocol import FileProtocol
-fp = FileProtocol()
+fp = FileProtocol() # Global instance
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(processName)s - %(message)s')
 
 def handle_client_connection(connection, address):
+    # fp is global. If FileInterface had complex state or unpicklable resources,
+    # instantiating FileProtocol here per process might be safer:
+    # local_fp = FileProtocol()
+    # then use local_fp.proses_string(...)
     logging.info(f"Connection from {address}")
     data_received_buffer = ""
     try:
@@ -25,7 +29,7 @@ def handle_client_connection(connection, address):
                 cleaned_message = message_to_process
                 logging.info(f"Processing data from {address}: {cleaned_message[:100]}...")
                 
-                response_data_json = fp.proses_string(cleaned_message)
+                response_data_json = fp.proses_string(cleaned_message) # Using global fp
                 response_with_delimiter = response_data_json + "\r\n\r\n"
                 connection.sendall(response_with_delimiter.encode())
                 break 
@@ -55,7 +59,7 @@ class Server:
                     try:
                         connection, client_address = self.server_socket.accept()
                         if self.num_workers == 0: # Emulate single-process behavior for testing worker=0
-                             handle_client_connection(connection, client_address)
+                             handle_client_connection(connection, client_address) # Run in main process
                         else:
                             executor.submit(handle_client_connection, connection, client_address)
                     except OSError as e:
@@ -82,5 +86,6 @@ def main():
     server_instance.start()
 
 if __name__ == "__main__":
+    # This is important for multiprocessing, especially on Windows.
     multiprocessing.freeze_support()
     main()
