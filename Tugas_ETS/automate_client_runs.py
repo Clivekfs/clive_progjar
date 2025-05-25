@@ -1,242 +1,176 @@
+import subprocess
 import os
-import socket
-import json
-import base64
-import logging
-import time as time_module 
+import sys
+import time
+import shlex
 import argparse
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-import multiprocessing
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(processName)s - %(threadName)s - %(message)s')
+OPERATIONS = ["UPLOAD", "DOWNLOAD"]
+VOLUMES_MB = [10, 50, 100]
+CLIENT_WORKER_LOAD_COUNTS = [1, 5, 50]
 
-TARGET_SERVER_ADDRESS = ('0.0.0.0', 50000) 
-
-def send_request_to_server(command_str=""):
-    response_json = None
-    sock = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(300)
-        sock.connect(TARGET_SERVER_ADDRESS)
-        
-        if not command_str.endswith("\r\n\r\n"):
-            command_str += "\r\n\r\n"
-        
-        sock.sendall(command_str.encode())
-
-        data_received_buffer = bytearray() 
-        while True:
-            data_chunk = sock.recv(65536) 
-            if not data_chunk:
-                break 
-            data_received_buffer.extend(data_chunk)
-            if b"\r\n\r\n" in data_received_buffer:
-                break
-        
-        decoded_buffer_str = data_received_buffer.decode()
-        if decoded_buffer_str.strip():
-            actual_response_data = decoded_buffer_str.split("\r\n\r\n")[0]
-            response_json = json.loads(actual_response_data)
-        else:
-            response_json = {'status': 'ERROR', 'data': 'No response from server'}
-
-    except socket.timeout:
-        logging.error(f"Worker ({os.getpid()}-{multiprocessing.current_process().name}-{threading.get_ident()}): Socket timeout with {TARGET_SERVER_ADDRESS}")
-        response_json = {'status': 'ERROR', 'data': 'Socket timeout'}
-    except ConnectionRefusedError:
-        logging.error(f"Worker ({os.getpid()}): Connection refused by {TARGET_SERVER_ADDRESS}")
-        response_json = {'status': 'ERROR', 'data': 'Connection refused'}
-    except json.JSONDecodeError as jde:
-        logging.error(f"Worker ({os.getpid()}): Failed to decode JSON response. Error: {jde}. Response buffer: '{data_received_buffer[:500]}...'")
-        response_json = {'status': 'ERROR', 'data': 'Invalid JSON response'}
-    except Exception as e:
-        logging.error(f"Worker ({os.getpid()}): Generic error in send_request_to_server: {type(e).__name__} - {e}")
-        response_json = {'status': 'ERROR', 'data': f'Client-side send/recv error: {str(e)}'}
-    finally:
-        if sock:
-            sock.close()
-    return response_json
-
-def perform_operation_task(worker_id, operation_type, local_file_path_for_upload, server_filename_for_op, file_size_bytes_expected):
-    start_time = time_module.time()
-    error_message = None
-    actual_processed_bytes = 0
-
-    try:
-        if operation_type == "UPLOAD":
-            if not os.path.exists(local_file_path_for_upload):
-                raise FileNotFoundError(f"Local file for upload not found: {local_file_path_for_upload}")
-            
-            with open(local_file_path_for_upload, 'rb') as fp:
-                file_content_bytes = fp.read()
-            
-            actual_processed_bytes = len(file_content_bytes)
-            if actual_processed_bytes != file_size_bytes_expected:
-                 logging.warning(f"Worker {worker_id}: UPLOAD file size mismatch. Expected {file_size_bytes_expected}, got {actual_processed_bytes}")
-            
-            encoded_content_str = base64.b64encode(file_content_bytes).decode()
-            command_str = f"UPLOAD {server_filename_for_op} {encoded_content_str}"
-            logging.debug(f"Worker {worker_id}: UPLOAD command for {server_filename_for_op} (data len: {len(encoded_content_str)})")
+CLIENT_UPLOAD_FILES_DIR = "test_files_client"
+PYTHON_EXE = sys.executable
+STRESS_CLIENT_SCRIPT = "stress_test_client.py" 
 
 
-        elif operation_type == "DOWNLOAD":
-            command_str = f"GET {server_filename_for_op}"
-            actual_processed_bytes = file_size_bytes_expected
-        
-        elif operation_type == "LIST":
-            command_str = f"LIST"
-        else:
-            raise ValueError(f"Unknown operation: {operation_type}")
+def run_single_stress_test(
+    test_id_global,
+    server_ip_to_test, 
+    operation_to_run,
+    volume_mb_for_table,
+    num_client_load_workers_for_stress_client,
+    client_stress_concurrency_type_for_stress_client,
+    current_server_worker_config_value, 
+    current_server_type_name,
+    output_csv_file
+):
+    volume_param_for_stress_client_call = 0 if operation_to_run == "LIST" else volume_mb_for_table
+    server_config_info_str_for_stress_client_call = f"{current_server_worker_config_value}_{current_server_type_name}"
 
-        response = send_request_to_server(command_str)
+    command_to_execute = [
+        PYTHON_EXE,
+        STRESS_CLIENT_SCRIPT,
+        str(test_id_global),
+        server_ip_to_test,
+        str(server_port_to_test),
+        operation_to_run,
+        str(volume_param_for_stress_client_call),
+        str(num_client_load_workers_for_stress_client),
+        client_stress_concurrency_type_for_stress_client,
+        server_config_info_str_for_stress_client_call
+    ]
 
-        if not response:
-             raise Exception("No response from server")
-        
-        if response.get('status') != 'OK':
-            error_detail = response.get('data', 'Unknown server error')
-            raise Exception(f"Server returned ERROR for {operation_type} {server_filename_for_op}: {error_detail}")
+    print(f"\n[Automator] Test Global ID: {test_id_global}")
+    print(f"  Target Server Config: {current_server_type_name} with {current_server_worker_config_value} workers")
+    print(f"  Client Stress Config: {num_client_load_workers_for_stress_client} workers using {client_stress_concurrency_type_for_stress_client}")
+    print(f"  Test Operation: {operation_to_run}, Context Volume for table: {volume_mb_for_table}MB")
+    print(f"  Executing: {shlex.join(command_to_execute)}")
 
-        if operation_type == "DOWNLOAD" and response.get('status') == 'OK':
-            downloaded_content_b64 = response.get('data_file', '')
-            if not downloaded_content_b64:
-                raise Exception("Downloaded file data is empty in response.")
-            downloaded_bytes = base64.b64decode(downloaded_content_b64)
-            actual_processed_bytes = len(downloaded_bytes)
-            logging.debug(f"Worker {worker_id}: Successfully downloaded {actual_processed_bytes} bytes for {server_filename_for_op}.")
-
-
-        elif operation_type == "LIST" and response.get('status') == 'OK':
-            actual_processed_bytes = len(json.dumps(response).encode())
-
-        success = True
-    
-    except FileNotFoundError as fnf_ex:
-        success = False
-        error_message = str(fnf_ex)
-    except Exception as e:
-        success = False
-        error_message = f"{type(e).__name__}: {str(e)}"
-
-
-    end_time = time_module.time()
-    time_taken_sec = end_time - start_time
-    
-    throughput_Bps = 0
-    if success and time_taken_sec > 0 and actual_processed_bytes > 0:
-        throughput_Bps = actual_processed_bytes / time_taken_sec
-    
-    return worker_id, success, time_taken_sec, throughput_Bps, actual_processed_bytes, error_message
-
-def run_stress_test(test_num, server_ip, server_port, operation, file_volume_mb, num_client_workers, client_pool_type, server_pool_size_info):
-    global TARGET_SERVER_ADDRESS
-    TARGET_SERVER_ADDRESS = (server_ip, int(server_port))
-
-    file_size_bytes_expected = 0
-    local_file_for_upload = ""
-    server_file_for_op = "" 
-
-    volume_name_str = f"{file_volume_mb}MB"
-    if operation in ["UPLOAD", "DOWNLOAD"]:
-        file_size_bytes_expected = int(file_volume_mb * 1024 * 1024)
-        local_file_for_upload = os.path.join("test_files_client", f"file_{volume_name_str}.dat")
-        server_file_for_op = f"server_file_{volume_name_str}.dat" 
-    elif operation == "LIST":
-        file_size_bytes_expected = 0
-    else:
-        logging.error(f"Invalid operation for stress test: {operation}")
-        print(f"{test_num},{operation},{file_volume_mb},{num_client_workers},{server_pool_size_info},0,0,0,{num_client_workers},N/A,N/A,Invalid_Operation")
-        return
-
-    if operation == "UPLOAD":
-        if not os.path.exists(local_file_for_upload):
-            logging.error(f"Required UPLOAD file {local_file_for_upload} does not exist. Run create_dummy_files.py.")
-            print(f"{test_num},{operation},{file_volume_mb},{num_client_workers},{server_pool_size_info},0,0,0,{num_client_workers},N/A,N/A,Missing_Upload_File")
+    if operation_to_run == "UPLOAD":
+        local_file_to_check = os.path.join(CLIENT_UPLOAD_FILES_DIR, f"file_{volume_mb_for_table}MB.dat")
+        if not os.path.exists(local_file_to_check):
+            error_message_detail = f"UPLOAD_FILE_NOT_FOUND:{local_file_to_check}"
+            print(f"  [Automator] ERROR: {error_message_detail}")
+            csv_line_on_error = f"{test_id_global},{operation_to_run},{volume_mb_for_table}MB,{num_client_load_workers_for_stress_client},{current_server_worker_config_value},0,0,0,{num_client_load_workers_for_stress_client},{error_message_detail}\n"
+            with open(output_csv_file, "a") as f_out:
+                f_out.write(csv_line_on_error)
             return
 
-    tasks_args = []
-    for i in range(num_client_workers):
-        worker_id = i + 1
-        current_server_target_filename = server_file_for_op
-        if operation == "UPLOAD":
-            current_server_target_filename = f"stress_upload_vol{file_volume_mb}MB_w{worker_id}.dat"
+    try:
+        process_result = subprocess.run(command_to_execute, capture_output=True, text=True, timeout=1800, check=False)
+
+        final_csv_line = ""
+        if process_result.stdout:
+            stress_client_raw_output = process_result.stdout.strip()
+            print(f"  [Automator] STDOUT from {STRESS_CLIENT_SCRIPT}:\n    {stress_client_raw_output}")
+            
+            output_parts = stress_client_raw_output.split(',')
+            if len(output_parts) >= 9:
+                avg_time = output_parts[5]
+                avg_throughput = output_parts[6]
+                succeeded_workers = output_parts[7]
+                failed_workers = output_parts[8]
+
+                csv_data_for_table = [
+                    str(test_id_global),
+                    operation_to_run,
+                    f"{volume_mb_for_table}MB",
+                    str(num_client_load_workers_for_stress_client),
+                    str(current_server_worker_config_value),
+                    avg_time,
+                    avg_throughput,
+                    succeeded_workers,
+                    failed_workers
+                ]
+                final_csv_line = ",".join(csv_data_for_table) + "\n"
+            else:
+                final_csv_line = f"{test_id_global},{operation_to_run},{volume_mb_for_table}MB,{num_client_load_workers_for_stress_client},{current_server_worker_config_value},ERROR,0,0,{num_client_load_workers_for_stress_client},MALFORMED_STRESS_CLIENT_OUTPUT\n"
+                print(f"  [Automator] ERROR: Malformed output from {STRESS_CLIENT_SCRIPT}")
+        else:
+            final_csv_line = f"{test_id_global},{operation_to_run},{volume_mb_for_table}MB,{num_client_load_workers_for_stress_client},{current_server_worker_config_value},ERROR,0,0,{num_client_load_workers_for_stress_client},NO_STDOUT_FROM_STRESS_CLIENT\n"
+            print(f"  [Automator] ERROR: No STDOUT from {STRESS_CLIENT_SCRIPT}.")
+
+        with open(output_csv_file, "a") as f_out:
+            f_out.write(final_csv_line)
+
+        if process_result.stderr:
+            print(f"  [Automator] STDERR from {STRESS_CLIENT_SCRIPT}:\n    {process_result.stderr.strip()}")
         
-        tasks_args.append((worker_id, operation, local_file_for_upload, current_server_target_filename, file_size_bytes_expected))
+        if process_result.returncode != 0:
+            print(f"  [Automator] WARNING: {STRESS_CLIENT_SCRIPT} exited with code {process_result.returncode}")
 
-    all_worker_results = []
-    test_start_wall_time = time_module.time()
-
-    if client_pool_type == "thread":
-        executor_class = ThreadPoolExecutor
-    elif client_pool_type == "process":
-        executor_class = ProcessPoolExecutor
-    else:
-        logging.error(f"Invalid client pool type: {client_pool_type}")
-        print(f"{test_num},{operation},{file_volume_mb},{num_client_workers},{server_pool_size_info},0,0,0,{num_client_workers},N/A,N/A,Invalid_Client_Pool_Type")
-        return
-
-    with executor_class(max_workers=num_client_workers if num_client_workers > 0 else None) as executor:
-        future_to_args = {executor.submit(perform_operation_task, *args): args for args in tasks_args}
-        
-        for future in as_completed(future_to_args):
-            try:
-                result = future.result()
-                all_worker_results.append(result)
-            except Exception as exc:
-                logging.error(f"Task generated an exception: {exc} for args {future_to_args[future]}")
-                worker_id_from_args = future_to_args[future][0]
-                all_worker_results.append((worker_id_from_args, False, 0,0,0, str(exc)))
+    except subprocess.TimeoutExpired:
+        timeout_error_detail = "TIMEOUT_EXPIRED_30MIN"
+        print(f"  [Automator] ERROR: {timeout_error_detail}")
+        csv_line_on_error = f"{test_id_global},{operation_to_run},{volume_mb_for_table}MB,{num_client_load_workers_for_stress_client},{current_server_worker_config_value},0,0,0,{num_client_load_workers_for_stress_client},{timeout_error_detail}\n"
+        with open(output_csv_file, "a") as f_out:
+            f_out.write(csv_line_on_error)
+    except Exception as e_main:
+        execution_failure_detail = f"AUTOMATOR_EXEC_FAIL:{type(e_main).__name__}"
+        print(f"  [Automator] ERROR: Failed to execute/process {STRESS_CLIENT_SCRIPT}: {e_main}")
+        csv_line_on_error = f"{test_id_global},{operation_to_run},{volume_mb_for_table}MB,{num_client_load_workers_for_stress_client},{current_server_worker_config_value},0,0,0,{num_client_load_workers_for_stress_client},{execution_failure_detail}\n"
+        with open(output_csv_file, "a") as f_out:
+            f_out.write(csv_line_on_error)
 
 
-    test_end_wall_time = time_module.time()
-    total_wall_time_for_test = test_end_wall_time - test_start_wall_time
-    
-    successful_client_ops = sum(1 for r in all_worker_results if r[1]) 
-    failed_client_ops = num_client_workers - successful_client_ops
-    
-    avg_time_per_client_op = 0
-    avg_throughput_per_client_op_Bps = 0
-
-    if successful_client_ops > 0:
-        total_time_successful = sum(r[2] for r in all_worker_results if r[1])
-        total_throughput_successful = sum(r[3] for r in all_worker_results if r[1])
-        
-        avg_time_per_client_op = total_time_successful / successful_client_ops
-        avg_throughput_per_client_op_Bps = total_throughput_successful / successful_client_ops
-      
-    print(f"{test_num},{operation},{file_volume_mb}MB,{num_client_workers} {client_pool_type},{server_pool_size_info},{avg_time_per_client_op:.4f},{avg_throughput_per_client_op_Bps:.2f},{successful_client_ops},{failed_client_ops},{total_wall_time_for_test:.4f}")
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="File Server Stress Test Client")
-    parser.add_argument("test_num", type=int, help="Test number for identification in results")
-    parser.add_argument("server_ip", help="Server IP address")
-    parser.add_argument("server_port", type=int, help="Server port number")
-    parser.add_argument("operation", choices=["UPLOAD", "DOWNLOAD", "LIST"], help="Operation to perform")
-    parser.add_argument("file_volume_mb", type=float, help="File volume in MB (for UPLOAD/DOWNLOAD). Use 0 for LIST.")
-    parser.add_argument("num_client_workers", type=int, help="Number of concurrent client workers (0 for sequential in main thread if executor handles it, or 1 for single worker)")
-    parser.add_argument("client_pool_type", choices=["thread", "process"], help="Client worker pool type")
-    parser.add_argument("server_pool_size_info", type=str, help="Informational string about server pool size (e.g., '5_threads')")
+def main_automator():
+    parser = argparse.ArgumentParser(description="Automated runner for stress_test_client.py")
+    parser.add_argument("server_ip", help="Target Server IP address")
+    parser.add_argument("server_port", type=int, help="Target Server port number")
+    parser.add_argument("current_server_workers", type=int, choices=[1, 5, 50], help="Number of workers the currently running server is configured with (1, 5, or 50)")
+    parser.add_argument("current_server_type", choices=["mthread_pool", "mproc_pool"], help="Type of the currently running server ('mthread_pool' or 'mproc_pool')")
+    parser.add_argument("client_stress_type", choices=["thread", "process"], help="Concurrency type for stress_test_client.py's own workers ('thread' or 'process')")
+    parser.add_argument("output_csv", help="Path to the CSV file to append results to")
+    parser.add_argument("--offset", type=int, default=0, help="Starting number for Test ID (Nomor column offset, default 0)")
 
     args = parser.parse_args()
 
-    if args.num_client_workers < 0:
-        print("Number of client workers cannot be negative.")
+    if not os.path.exists(STRESS_CLIENT_SCRIPT):
+        print(f"CRITICAL ERROR: The stress client script '{STRESS_CLIENT_SCRIPT}' was not found. Exiting.")
         sys.exit(1)
-    if args.operation != "LIST" and args.file_volume_mb <= 0:
-        print("File volume must be positive for UPLOAD/DOWNLOAD.")
-        sys.exit(1)
-        
-    if args.client_pool_type == "process":
-        multiprocessing.freeze_support()
 
-    run_stress_test(
-        args.test_num,
-        args.server_ip,
-        args.server_port,
-        args.operation,
-        args.file_volume_mb,
-        args.num_client_workers,
-        args.client_pool_type,
-        args.server_pool_size_info
-    )
+    if not os.path.exists(CLIENT_UPLOAD_FILES_DIR) and "UPLOAD" in OPERATIONS :
+        print(f"WARNING: Client upload files directory '{CLIENT_UPLOAD_FILES_DIR}' not found. UPLOAD tests may fail if files are missing. Consider running create_dummy_files.py.")
+
+    if not os.path.exists(args.output_csv) or os.path.getsize(args.output_csv) == 0:
+        with open(args.output_csv, "w") as f_header:
+            f_header.write("Nomor,Operasi,Volume,JumlahClientWorkerPool,JumlahServerWorkerPool,WaktuTotalPerClient(s),ThroughputPerClient(Bps),JumlahClientSukses,JumlahClientGagal\n")
+        print(f"Initialized CSV results file: {args.output_csv}")
+    else:
+        print(f"Appending results to existing CSV file: {args.output_csv}")
+    
+    print(f"--- Starting Batch of Automated Client Runs ---")
+    print(f"  Targeting Server: {args.server_ip}:{args.server_port}")
+    print(f"  Assumed Server Config: Workers={args.current_server_workers}, Type='{args.current_server_type}'")
+    print(f"  Client Stress Type for these runs: '{args.client_stress_type}' pool in {STRESS_CLIENT_SCRIPT}")
+    print(f"  Test ID (Nomor) Offset: {args.offset}")
+    
+    test_run_count_this_batch = 0
+    
+    for operation_loop_var in OPERATIONS:
+        for volume_mb_loop_var in VOLUMES_MB:
+            for num_client_load_workers_loop_var in CLIENT_WORKER_LOAD_COUNTS:
+                test_run_count_this_batch += 1
+                effective_global_test_id = args.offset + test_run_count_this_batch
+                
+                run_single_stress_test(
+                    effective_global_test_id,
+                    args.server_ip,
+                    args.server_port,
+                    operation_loop_var,
+                    volume_mb_loop_var,
+                    num_client_load_workers_loop_var,
+                    args.client_stress_type,
+                    args.current_server_workers,
+                    args.current_server_type,
+                    args.output_csv
+                )
+                time.sleep(5) 
+
+    total_tests_in_this_batch_config = len(OPERATIONS) * len(VOLUMES_MB) * len(CLIENT_WORKER_LOAD_COUNTS)
+    print(f"\n--- Batch of {test_run_count_this_batch} (expected {total_tests_in_this_batch_config}) Client Runs Complete ---")
+    print(f"Results for this batch appended to: {args.output_csv}")
+
+if __name__ == "__main__":
+    main_automator()
