@@ -1,9 +1,10 @@
+import os
 import socket
 import json
 import base64
 import logging
 
-server_address=('0.0.0.0',7777)
+server_address=('0.0.0.0',50000)
 
 def send_command(command_str=""):
     global server_address
@@ -11,33 +12,31 @@ def send_command(command_str=""):
     sock.connect(server_address)
     logging.warning(f"connecting to {server_address}")
     try:
-        logging.warning(f"sending message ")
+
+        if not command_str.endswith("\r\n\r\n"):
+            command_str += "\r\n\r\n"
+
         sock.sendall(command_str.encode())
-        # Look for the response, waiting until socket is done (no more data)
-        data_received="" #empty string
+
+        data_received = ""
         while True:
-            #socket does not receive all data at once, data comes in part, need to be concatenated at the end of process
-            data = sock.recv(16)
+            data = sock.recv(4096)  # Jangan kecil! Bisa terpotong base64-nya
             if data:
-                #data is not empty, concat with previous content
                 data_received += data.decode()
                 if "\r\n\r\n" in data_received:
                     break
             else:
-                # no more data, stop the process by break
                 break
-        # at this point, data_received (string) will contain all data coming from the socket
-        # to be able to use the data_received as a dict, need to load it using json.loads()
-        hasil = json.loads(data_received)
-        logging.warning("data received from server:")
+
+        hasil = json.loads(data_received.strip())
         return hasil
-    except:
-        logging.warning("error during data receiving")
+
+    except Exception as e:
+        logging.warning(f"error during data receiving: {e}")
         return False
 
-
 def remote_list():
-    command_str=f"LIST"
+    command_str=f"LIST\r\n\r\n"
     hasil = send_command(command_str)
     if (hasil['status']=='OK'):
         print("daftar file : ")
@@ -49,7 +48,7 @@ def remote_list():
         return False
 
 def remote_get(filename=""):
-    command_str=f"GET {filename}"
+    command_str=f"GET {filename}\r\n\r\n"
     hasil = send_command(command_str)
     if (hasil['status']=='OK'):
         #proses file dalam bentuk base64 ke bentuk bytes
@@ -63,9 +62,78 @@ def remote_get(filename=""):
         print("Gagal")
         return False
 
+def remote_upload(local_filepath=""):
+    print(f"Client: Attempting UPLOAD for '{local_filepath}'")
+    if not local_filepath:
+        print("Client: Path file lokal kosong.")
+        return False
+    if not os.path.exists(local_filepath):
+        print(f"Client: File lokal '{local_filepath}' tidak ditemukan.")
+        return False
+    try:
+        server_filename = os.path.basename(local_filepath)
+        with open(local_filepath, 'rb') as fp:
+            file_content_bytes = fp.read()
+        encoded_content_str = base64.b64encode(file_content_bytes).decode()
+        command_str = f"UPLOAD {server_filename} {encoded_content_str}\r\n\r\n"
+        hasil = send_command(command_str)
+        if hasil and hasil.get('status') == 'OK':
+            print(f"Client: Upload '{server_filename}' berhasil: {hasil.get('data')}")
+            return True
+        else:
+            error_msg = hasil.get('data', 'Unknown error') if hasil else "No response"
+            print(f"Client: Gagal upload '{server_filename}': {error_msg}")
+            return False
+    except Exception as e:
+        print(f"Client: Error UPLOAD '{local_filepath}': {str(e)}")
+        return False
 
-if __name__=='__main__':
-    server_address=('172.16.16.101',6666)
-    remote_list()
-    remote_get('donalbebek.jpg')
 
+def remote_delete(filename=""):
+    if not filename:
+        print("Client: Nama file untuk DELETE tidak boleh kosong.")
+        return False
+    command_str = f"DELETE {filename}\r\n\r\n"
+    hasil = send_command(command_str)
+    if hasil and hasil.get('status') == 'OK':
+        print(f"Client: Hapus file '{filename}' berhasil: {hasil.get('data')}")
+        return True
+    else:
+        error_msg = hasil.get('data', 'Unknown error') if hasil else "No response or critical error"
+        print(f"Client: Gagal menghapus file '{filename}': {error_msg}")
+        return False
+
+
+if __name__ == '__main__':
+    server_address = ('172.16.16.101', 50000)
+    while True:
+        try:
+            user_input = input("Enter command > ").strip()
+            if not user_input:
+                continue
+
+            parts = user_input.split()
+            command = parts[0].upper()
+
+            if command == "LIST":
+                remote_list()
+            elif command == "GET":
+                if len(parts) > 1:
+                    remote_get(parts[1])
+                else:
+                    print("Usage: GET <server_filename>")
+            elif command == "UPLOAD":
+                if len(parts) > 1:
+                    local_file_to_upload = parts[1]
+                    remote_upload(local_file_to_upload)
+                else:
+                    print("Usage: UPLOAD <local_filepath>")
+            elif command == "DELETE":
+                if len(parts) > 1:
+                    remote_delete(parts[1])
+                else:
+                    print("Usage: DELETE <server_filename>")
+            else:
+                print(f"Unknown command: {command}.")
+        except Exception as e:
+            print(f"An error occurred: {e}")
