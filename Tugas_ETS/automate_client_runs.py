@@ -6,54 +6,61 @@ import shlex
 import argparse
 
 OPERATIONS = ["UPLOAD", "DOWNLOAD"]
-VOLUMES_MB = [10, 50, 100]
+VOLUMES_MB = [10, 50, 100] 
 CLIENT_WORKER_LOAD_COUNTS = [1, 5, 50]
 
 CLIENT_UPLOAD_FILES_DIR = "test_files_client"
 PYTHON_EXE = sys.executable
-STRESS_CLIENT_SCRIPT = "stress_test_client.py" 
+STRESS_CLIENT_SCRIPT = "stress_test_client.py"
 
 
 def run_single_stress_test(
     test_id_global,
-    server_ip_to_test, 
-    operation_to_run,
-    volume_mb_for_table,
-    num_client_load_workers_for_stress_client,
-    client_stress_concurrency_type_for_stress_client,
-    current_server_worker_config_value, 
-    current_server_type_name,
-    output_csv_file
+    server_ip_arg,
+    server_port_arg,
+    operation_arg,
+    volume_mb_for_table_arg,
+    num_client_load_workers_arg,
+    client_stress_concurrency_type_arg,
+    actual_server_worker_count_arg,
+    actual_server_type_name_arg,
+    output_csv_file_path_arg
 ):
-    volume_param_for_stress_client_call = 0 if operation_to_run == "LIST" else volume_mb_for_table
-    server_config_info_str_for_stress_client_call = f"{current_server_worker_config_value}_{current_server_type_name}"
+
+    volume_as_float_str = f"{float(volume_mb_for_table_arg)}" # e.g., "10.0"
+
+    volume_param_for_stress_client_call = volume_as_float_str 
+
+    server_config_info_str_for_stress_client_call = f"{actual_server_worker_count_arg}_{actual_server_type_name_arg}"
 
     command_to_execute = [
         PYTHON_EXE,
         STRESS_CLIENT_SCRIPT,
         str(test_id_global),
-        server_ip_to_test,
-        str(server_port_to_test),
-        operation_to_run,
-        str(volume_param_for_stress_client_call),
-        str(num_client_load_workers_for_stress_client),
-        client_stress_concurrency_type_for_stress_client,
+        server_ip_arg,
+        str(server_port_arg),
+        operation_arg,
+        volume_param_for_stress_client_call, 
+        str(num_client_load_workers_arg),
+        client_stress_concurrency_type_arg,
         server_config_info_str_for_stress_client_call
     ]
 
     print(f"\n[Automator] Test Global ID: {test_id_global}")
-    print(f"  Target Server Config: {current_server_type_name} with {current_server_worker_config_value} workers")
-    print(f"  Client Stress Config: {num_client_load_workers_for_stress_client} workers using {client_stress_concurrency_type_for_stress_client}")
-    print(f"  Test Operation: {operation_to_run}, Context Volume for table: {volume_mb_for_table}MB")
+    print(f"  Target Server Config: {actual_server_type_name_arg} with {actual_server_worker_count_arg} workers")
+    print(f"  Client Stress Config: {num_client_load_workers_arg} workers using {client_stress_concurrency_type_arg}")
+    print(f"  Test Operation: {operation_arg}, Context Volume for table: {volume_mb_for_table_arg}MB")
     print(f"  Executing: {shlex.join(command_to_execute)}")
 
-    if operation_to_run == "UPLOAD":
-        local_file_to_check = os.path.join(CLIENT_UPLOAD_FILES_DIR, f"file_{volume_mb_for_table}MB.dat")
-        if not os.path.exists(local_file_to_check):
-            error_message_detail = f"UPLOAD_FILE_NOT_FOUND:{local_file_to_check}"
-            print(f"  [Automator] ERROR: {error_message_detail}")
-            csv_line_on_error = f"{test_id_global},{operation_to_run},{volume_mb_for_table}MB,{num_client_load_workers_for_stress_client},{current_server_worker_config_value},0,0,0,{num_client_load_workers_for_stress_client},{error_message_detail}\n"
-            with open(output_csv_file, "a") as f_out:
+    if operation_arg == "UPLOAD":
+        filename_for_check = f"file_{volume_as_float_str}MB.dat" 
+        expected_local_file = os.path.join(CLIENT_UPLOAD_FILES_DIR, filename_for_check)
+        
+        if not os.path.exists(expected_local_file):
+            error_message_detail = f"UPLOAD_FILE_NOT_FOUND:{expected_local_file}" 
+            print(f"  [Automator] ERROR: {error_message_detail}. Please ensure create_dummy_files.py created this exact filename.")
+            csv_line_on_error = f"{test_id_global},{operation_arg},{volume_mb_for_table_arg}MB,{num_client_load_workers_arg},{actual_server_worker_count_arg},0,0,0,{num_client_load_workers_arg},{error_message_detail}\n"
+            with open(output_csv_file_path_arg, "a") as f_out:
                 f_out.write(csv_line_on_error)
             return
 
@@ -74,10 +81,10 @@ def run_single_stress_test(
 
                 csv_data_for_table = [
                     str(test_id_global),
-                    operation_to_run,
-                    f"{volume_mb_for_table}MB",
-                    str(num_client_load_workers_for_stress_client),
-                    str(current_server_worker_config_value),
+                    operation_arg,
+                    f"{volume_mb_for_table_arg}MB", 
+                    str(num_client_load_workers_arg),
+                    str(actual_server_worker_count_arg),
                     avg_time,
                     avg_throughput,
                     succeeded_workers,
@@ -85,13 +92,13 @@ def run_single_stress_test(
                 ]
                 final_csv_line = ",".join(csv_data_for_table) + "\n"
             else:
-                final_csv_line = f"{test_id_global},{operation_to_run},{volume_mb_for_table}MB,{num_client_load_workers_for_stress_client},{current_server_worker_config_value},ERROR,0,0,{num_client_load_workers_for_stress_client},MALFORMED_STRESS_CLIENT_OUTPUT\n"
+                final_csv_line = f"{test_id_global},{operation_arg},{volume_mb_for_table_arg}MB,{num_client_load_workers_arg},{actual_server_worker_count_arg},ERROR,0,0,{num_client_load_workers_arg},MALFORMED_STRESS_CLIENT_OUTPUT\n"
                 print(f"  [Automator] ERROR: Malformed output from {STRESS_CLIENT_SCRIPT}")
         else:
-            final_csv_line = f"{test_id_global},{operation_to_run},{volume_mb_for_table}MB,{num_client_load_workers_for_stress_client},{current_server_worker_config_value},ERROR,0,0,{num_client_load_workers_for_stress_client},NO_STDOUT_FROM_STRESS_CLIENT\n"
+            final_csv_line = f"{test_id_global},{operation_arg},{volume_mb_for_table_arg}MB,{num_client_load_workers_arg},{actual_server_worker_count_arg},ERROR,0,0,{num_client_load_workers_arg},NO_STDOUT_FROM_STRESS_CLIENT\n"
             print(f"  [Automator] ERROR: No STDOUT from {STRESS_CLIENT_SCRIPT}.")
 
-        with open(output_csv_file, "a") as f_out:
+        with open(output_csv_file_path_arg, "a") as f_out:
             f_out.write(final_csv_line)
 
         if process_result.stderr:
@@ -103,14 +110,14 @@ def run_single_stress_test(
     except subprocess.TimeoutExpired:
         timeout_error_detail = "TIMEOUT_EXPIRED_30MIN"
         print(f"  [Automator] ERROR: {timeout_error_detail}")
-        csv_line_on_error = f"{test_id_global},{operation_to_run},{volume_mb_for_table}MB,{num_client_load_workers_for_stress_client},{current_server_worker_config_value},0,0,0,{num_client_load_workers_for_stress_client},{timeout_error_detail}\n"
-        with open(output_csv_file, "a") as f_out:
+        csv_line_on_error = f"{test_id_global},{operation_arg},{volume_mb_for_table_arg}MB,{num_client_load_workers_arg},{actual_server_worker_count_arg},0,0,0,{num_client_load_workers_arg},{timeout_error_detail}\n"
+        with open(output_csv_file_path_arg, "a") as f_out:
             f_out.write(csv_line_on_error)
     except Exception as e_main:
         execution_failure_detail = f"AUTOMATOR_EXEC_FAIL:{type(e_main).__name__}"
         print(f"  [Automator] ERROR: Failed to execute/process {STRESS_CLIENT_SCRIPT}: {e_main}")
-        csv_line_on_error = f"{test_id_global},{operation_to_run},{volume_mb_for_table}MB,{num_client_load_workers_for_stress_client},{current_server_worker_config_value},0,0,0,{num_client_load_workers_for_stress_client},{execution_failure_detail}\n"
-        with open(output_csv_file, "a") as f_out:
+        csv_line_on_error = f"{test_id_global},{operation_arg},{volume_mb_for_table_arg}MB,{num_client_load_workers_arg},{actual_server_worker_count_arg},0,0,0,{num_client_load_workers_arg},{execution_failure_detail}\n"
+        with open(output_csv_file_path_arg, "a") as f_out:
             f_out.write(csv_line_on_error)
 
 
@@ -131,7 +138,7 @@ def main_automator():
         sys.exit(1)
 
     if not os.path.exists(CLIENT_UPLOAD_FILES_DIR) and "UPLOAD" in OPERATIONS :
-        print(f"WARNING: Client upload files directory '{CLIENT_UPLOAD_FILES_DIR}' not found. UPLOAD tests may fail if files are missing. Consider running create_dummy_files.py.")
+        print(f"WARNING: Client upload files directory '{CLIENT_UPLOAD_FILES_DIR}' not found. UPLOAD tests may fail if files are missing. Ensure create_dummy_files.py (float-naming version) has been run in the correct directory.")
 
     if not os.path.exists(args.output_csv) or os.path.getsize(args.output_csv) == 0:
         with open(args.output_csv, "w") as f_header:
@@ -161,10 +168,10 @@ def main_automator():
                     operation_loop_var,
                     volume_mb_loop_var,
                     num_client_load_workers_loop_var,
-                    args.client_stress_type,
+                    args.client_stress_type, 
                     args.current_server_workers,
-                    args.current_server_type,
-                    args.output_csv
+                    args.current_server_type,   
+                    args.output_csv             
                 )
                 time.sleep(5) 
 
