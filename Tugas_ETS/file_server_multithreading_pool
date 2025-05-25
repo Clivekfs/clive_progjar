@@ -13,7 +13,7 @@ def handle_client_connection(connection, address):
     data_received_buffer = ""
     try:
         while True:
-            data_chunk = connection.recv(4096) # Receiving in chunks
+            data_chunk = connection.recv(4096)
             if not data_chunk:
                 break # Connection closed by client
             data_received_buffer += data_chunk.decode()
@@ -47,7 +47,6 @@ class Server:
     def start(self):
         try:
             self.server_socket.bind((self.ip_address, self.port))
-            # Listen with a backlog that can accommodate expected concurrent connections temporarily
             self.server_socket.listen(self.num_workers * 2 if self.num_workers > 0 else 5) 
             logging.info(f"Server listening on {self.ip_address}:{self.port} with {self.num_workers} worker threads (ThreadPool)")
 
