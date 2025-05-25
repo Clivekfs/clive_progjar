@@ -1,3 +1,4 @@
+#file_server.py
 from socket import *
 import socket
 import threading
@@ -9,7 +10,6 @@ import sys
 from file_protocol import  FileProtocol
 fp = FileProtocol()
 
-
 class ProcessTheClient(threading.Thread):
     def __init__(self, connection, address):
         self.connection = connection
@@ -17,20 +17,28 @@ class ProcessTheClient(threading.Thread):
         threading.Thread.__init__(self)
 
     def run(self):
+        data_received = ""
         while True:
-            data = self.connection.recv(32)
+            data = self.connection.recv(1024)
             if data:
-                d = data.decode()
-                hasil = fp.proses_string(d)
-                hasil=hasil+"\r\n\r\n"
-                self.connection.sendall(hasil.encode())
+                data_received += data.decode()
+                if "\r\n\r\n" in data_received:
+                    break
             else:
                 break
+
+        if data_received:
+            # Hapus \r\n\r\n sebelum diproses
+            cleaned = data_received.replace("\r\n\r\n", "")
+            hasil = fp.proses_string(cleaned)
+            hasil = hasil + "\r\n\r\n"
+            self.connection.sendall(hasil.encode())
+
         self.connection.close()
 
 
 class Server(threading.Thread):
-    def __init__(self,ipaddress='0.0.0.0',port=8889):
+    def __init__(self,ipaddress='0.0.0.0',port=50000):
         self.ipinfo=(ipaddress,port)
         self.the_clients = []
         self.my_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -51,10 +59,9 @@ class Server(threading.Thread):
 
 
 def main():
-    svr = Server(ipaddress='0.0.0.0',port=6666)
+    svr = Server(ipaddress='0.0.0.0',port=50000)
     svr.start()
 
 
 if __name__ == "__main__":
     main()
-
